@@ -74,17 +74,37 @@ make build
 
 ```text
 finalproject_Detushev_M-26-555/
-├── src/
-│   └── finalproject_detushev_m_26_555/
+├── data/
+│   ├── users.json
+│   ├── portfolios.json
+│   └── rates.json
+├── valutatrade_hub/
+│   ├── __init__.py
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── models.py
+│   │   ├── utils.py
+│   │   └── usecases.py
+│   └── cli/
 │       ├── __init__.py
-│       └── main.py
-├── .gitignore
-├── .python-version
+│       └── interface.py
+├── main.py
 ├── Makefile
 ├── README.md
 ├── pyproject.toml
 └── uv.lock
 ```
+
+Назначение основных модулей:
+
+- `models.py` — классы `User`, `Wallet` и `Portfolio`.
+- `utils.py` — работа с JSON-хранилищем.
+- `usecases.py` — бизнес-логика регистрации, авторизации и валютных операций.
+- `interface.py` — консольные команды и взаимодействие с пользователем.
+- `main.py` — альтернативная точка входа приложения.
+- `data/` — локальные данные пользователей, портфелей и курсов валют.
+
+Каталог `data/` исключён из Git для защиты пользовательских данных.
 
 ## Состояние проекта
 

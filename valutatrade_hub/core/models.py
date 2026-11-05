@@ -4,6 +4,14 @@ import math
 import secrets
 from datetime import datetime, timezone
 
+DEFAULT_EXCHANGE_RATES: dict[str, float] = {
+    "USD": 1.0,
+    "EUR": 1.0786,
+    "BTC": 59337.21,
+    "RUB": 0.01016,
+    "ETH": 3720.0,
+}
+
 
 class User:
     """Представлять пользователя валютной платформы."""
@@ -268,13 +276,7 @@ class Portfolio:
         base_code = self._validate_currency_code(base_currency)
 
         if exchange_rates is None:
-            exchange_rates = {
-                "USD": 1.0,
-                "EUR": 1.0786,
-                "BTC": 59337.21,
-                "RUB": 0.01016,
-                "ETH": 3720.0,
-            }
+            exchange_rates = DEFAULT_EXCHANGE_RATES
 
         if base_code not in exchange_rates:
             raise ValueError(f"Неизвестная базовая валюта '{base_code}'")

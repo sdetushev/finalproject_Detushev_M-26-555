@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-wallet = "valutatrade_hub.main:main"
+wallet = "valutatrade_hub.cli.interface:run_cli"
 
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13.0"]
@@ -42,3 +42,4 @@ indent-style = "space"
 
 [tool.uv.build-backend]
 module-name = "valutatrade_hub"
+module-root = ""
