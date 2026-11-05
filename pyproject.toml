@@ -1,0 +1,41 @@
+[project]
+name = "finalproject-detushev-m-26-555"
+version = "0.1.0"
+description = "Console application for managing a multi-currency wallet"
+readme = "README.md"
+authors = [
+    { name = "Sam", email = "agro.gnom@yandex.ru" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "prettytable>=3.18.0",
+]
+
+[project.scripts]
+wallet = "finalproject_detushev_m_26_555.main:main"
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.3",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E4",  # Ошибки, связанные с импортами
+    "E7",  # Ошибки оформления кода
+    "E9",  # Синтаксические ошибки
+    "F",   # Ошибки Pyflakes
+    "I",   # Порядок импортов
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
