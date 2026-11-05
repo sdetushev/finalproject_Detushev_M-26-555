@@ -4,12 +4,12 @@ import math
 import secrets
 from datetime import datetime, timezone
 
-DEFAULT_EXCHANGE_RATES: dict[str, float] = {
+DEFAULT_EXCHANGE_RATES = {
     "USD": 1.0,
-    "EUR": 1.0786,
-    "BTC": 59337.21,
-    "RUB": 0.01016,
-    "ETH": 3720.0,
+    "EUR": 1.1267,
+    "BTC": 80442.71,
+    "RUB": 1 / 81.6699,
+    "ETH": 2424.46,
 }
 
 

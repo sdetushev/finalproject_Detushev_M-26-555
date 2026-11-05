@@ -1,8 +1,12 @@
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 
 from valutatrade_hub.core import utils
 from valutatrade_hub.core.models import DEFAULT_EXCHANGE_RATES, Portfolio, User, Wallet
+
+
+class InsufficientFundsError(ValueError):
+    """Ошибка отсутствия кошелька или недостаточности средств."""
 
 
 def register_user(username: str, password: str) -> User:
@@ -203,17 +207,11 @@ def buy_currency(
     currency_code: str,
     amount: float,
 ) -> dict[str, str | float]:
-    """Купить валюту за USD и сохранить обновлённый портфель."""
+    """Купить валюту без списания средств с USD-кошелька."""
     if not isinstance(currency_code, str) or not currency_code.strip():
         raise ValueError("Код валюты не может быть пустым")
 
-    code = currency_code.strip().upper()
-
-    if code == "USD":
-        raise ValueError("Покупка USD за USD не поддерживается")
-
-    if code not in DEFAULT_EXCHANGE_RATES:
-        raise ValueError(f"Не удалось получить курс для {code}→USD")
+    currency_code = currency_code.strip().upper()
 
     if (
         isinstance(amount, bool)
@@ -223,49 +221,38 @@ def buy_currency(
     ):
         raise ValueError("'amount' должен быть положительным числом")
 
-    rate = DEFAULT_EXCHANGE_RATES[code]
-    cost_usd = amount * rate
+    if currency_code not in DEFAULT_EXCHANGE_RATES:
+        raise ValueError(f"Не удалось получить курс для {currency_code}→USD")
 
-    if not math.isfinite(cost_usd) or cost_usd <= 0:
-        raise ValueError("Некорректная стоимость покупки")
+    rate = DEFAULT_EXCHANGE_RATES[currency_code]
+    estimated_cost_usd = amount * rate
+
+    if not math.isfinite(estimated_cost_usd):
+        raise ValueError("Оценочная стоимость покупки слишком велика")
 
     portfolio = load_portfolio(user)
 
     try:
-        usd_wallet = portfolio.get_wallet("USD")
+        wallet = portfolio.get_wallet(currency_code)
     except ValueError:
-        raise ValueError("В портфеле отсутствует USD-кошелёк") from None
+        portfolio.add_currency(currency_code)
+        wallet = portfolio.get_wallet(currency_code)
 
-    if usd_wallet.balance < cost_usd:
-        raise ValueError(
-            f"Недостаточно средств: доступно {usd_wallet.balance:.2f} USD, "
-            f"требуется {cost_usd:.2f} USD"
-        )
-
-    try:
-        currency_wallet = portfolio.get_wallet(code)
-    except ValueError:
-        portfolio.add_currency(code)
-        currency_wallet = portfolio.get_wallet(code)
-
-    balance_before = currency_wallet.balance
+    balance_before = wallet.balance
 
     if not math.isfinite(balance_before + amount):
         raise ValueError("Баланс после покупки слишком велик")
 
-    usd_wallet.withdraw(cost_usd)
-    currency_wallet.deposit(amount)
-
+    wallet.deposit(amount)
     save_portfolio(portfolio)
 
     return {
-        "currency_code": code,
+        "currency_code": currency_code,
         "amount": float(amount),
         "rate": rate,
-        "cost_usd": cost_usd,
+        "cost_usd": estimated_cost_usd,
         "balance_before": balance_before,
-        "balance_after": currency_wallet.balance,
-        "usd_balance_after": usd_wallet.balance,
+        "balance_after": wallet.balance,
     }
 
 
@@ -274,17 +261,11 @@ def sell_currency(
     currency_code: str,
     amount: float,
 ) -> dict[str, str | float]:
-    """Продать валюту за USD и сохранить обновлённый портфель."""
+    """Продать валюту без начисления средств на USD-кошелёк."""
     if not isinstance(currency_code, str) or not currency_code.strip():
         raise ValueError("Код валюты не может быть пустым")
 
-    code = currency_code.strip().upper()
-
-    if code == "USD":
-        raise ValueError("Продажа USD за USD не поддерживается")
-
-    if code not in DEFAULT_EXCHANGE_RATES:
-        raise ValueError(f"Не удалось получить курс для {code}→USD")
+    currency_code = currency_code.strip().upper()
 
     if (
         isinstance(amount, bool)
@@ -294,51 +275,104 @@ def sell_currency(
     ):
         raise ValueError("'amount' должен быть положительным числом")
 
-    rate = DEFAULT_EXCHANGE_RATES[code]
-    revenue_usd = amount * rate
+    if currency_code not in DEFAULT_EXCHANGE_RATES:
+        raise ValueError(f"Не удалось получить курс для {currency_code}→USD")
 
-    if not math.isfinite(revenue_usd) or revenue_usd <= 0:
-        raise ValueError("Некорректная стоимость продажи")
+    rate = DEFAULT_EXCHANGE_RATES[currency_code]
+    estimated_revenue_usd = amount * rate
+
+    if not math.isfinite(estimated_revenue_usd):
+        raise ValueError("Оценочная выручка слишком велика")
 
     portfolio = load_portfolio(user)
 
     try:
-        currency_wallet = portfolio.get_wallet(code)
+        wallet = portfolio.get_wallet(currency_code)
     except ValueError:
-        raise ValueError(
-            f"У вас нет кошелька '{code}'. "
-            "Добавьте валюту: она создаётся автоматически при первой покупке."
-        ) from None
+        raise InsufficientFundsError(f"У вас нет кошелька '{currency_code}'") from None
 
-    if currency_wallet.balance < amount:
-        raise ValueError(
+    balance_before = wallet.balance
+
+    if balance_before < amount:
+        raise InsufficientFundsError(
             f"Недостаточно средств: доступно "
-            f"{currency_wallet.balance:.4f} {code}, "
-            f"требуется {amount:.4f} {code}"
+            f"{balance_before:.8g} {currency_code}, "
+            f"запрошено {amount:.8g} {currency_code}"
         )
 
-    try:
-        usd_wallet = portfolio.get_wallet("USD")
-    except ValueError:
-        portfolio.add_currency("USD")
-        usd_wallet = portfolio.get_wallet("USD")
-
-    if not math.isfinite(usd_wallet.balance + revenue_usd):
-        raise ValueError("Баланс USD после продажи слишком велик")
-
-    balance_before = currency_wallet.balance
-
-    currency_wallet.withdraw(amount)
-    usd_wallet.deposit(revenue_usd)
-
+    wallet.withdraw(amount)
     save_portfolio(portfolio)
 
     return {
-        "currency_code": code,
+        "currency_code": currency_code,
         "amount": float(amount),
         "rate": rate,
-        "revenue_usd": revenue_usd,
+        "revenue_usd": estimated_revenue_usd,
         "balance_before": balance_before,
-        "balance_after": currency_wallet.balance,
-        "usd_balance_after": usd_wallet.balance,
+        "balance_after": wallet.balance,
     }
+
+
+def get_stub_rate(from_currency: str, to_currency: str) -> float:
+    """Рассчитать тестовый курс между двумя валютами через USD."""
+    if (
+        not isinstance(from_currency, str)
+        or not isinstance(to_currency, str)
+        or not from_currency.strip()
+        or not to_currency.strip()
+    ):
+        raise ValueError("Коды валют не могут быть пустыми")
+
+    from_code = from_currency.strip().upper()
+    to_code = to_currency.strip().upper()
+
+    if from_code not in DEFAULT_EXCHANGE_RATES:
+        raise ValueError(f"Неизвестная валюта: {from_code}")
+
+    if to_code not in DEFAULT_EXCHANGE_RATES:
+        raise ValueError(f"Неизвестная валюта: {to_code}")
+
+    from_rate_usd = DEFAULT_EXCHANGE_RATES[from_code]
+    to_rate_usd = DEFAULT_EXCHANGE_RATES[to_code]
+
+    return from_rate_usd / to_rate_usd
+
+
+def get_rate_info(
+    from_currency: str,
+    to_currency: str,
+) -> dict[str, str | float]:
+    """Получить фиксированный курс и сохранить его в JSON."""
+    rate = get_stub_rate(from_currency, to_currency)
+
+    from_code = from_currency.strip().upper()
+    to_code = to_currency.strip().upper()
+    pair = f"{from_code}/{to_code}"
+
+    rates = utils.load_json("rates.json")
+
+    if not isinstance(rates, dict):
+        raise ValueError("Некорректный формат rates.json")
+
+    cached = rates.get(pair)
+
+    if (
+        isinstance(cached, dict)
+        and cached.get("rate") == rate
+        and cached.get("source") == "fixed_snapshot"
+        and cached.get("snapshot_date") == "2026-11-05"
+        and isinstance(cached.get("saved_at"), str)
+    ):
+        return cached
+
+    rate_info = {
+        "rate": rate,
+        "source": "fixed_snapshot",
+        "snapshot_date": "2026-11-05",
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    rates[pair] = rate_info
+    utils.save_json("rates.json", rates)
+
+    return rate_info

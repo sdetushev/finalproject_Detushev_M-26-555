@@ -6,6 +6,7 @@ from valutatrade_hub.core.models import User
 from valutatrade_hub.core.usecases import (
     buy_currency,
     get_portfolio_summary,
+    get_rate_info,
     login_user,
     register_user,
     sell_currency,
@@ -113,6 +114,30 @@ def parse_trade_args(args: list[str], command: str) -> tuple[str, float]:
     return options["--currency"], amount
 
 
+def parse_rate_args(args: list[str]) -> tuple[str, str]:
+    """Разобрать параметры команды получения валютного курса."""
+    usage = "Использование: get-rate --from <валюта> --to <валюта>"
+
+    if len(args) != 4:
+        raise ValueError(usage)
+
+    options: dict[str, str] = {}
+
+    for index in range(0, len(args), 2):
+        flag = args[index]
+        value = args[index + 1].strip()
+
+        if flag not in ("--from", "--to") or flag in options or not value:
+            raise ValueError(usage)
+
+        options[flag] = value.upper()
+
+    if set(options) != {"--from", "--to"}:
+        raise ValueError(usage)
+
+    return options["--from"], options["--to"]
+
+
 def handle_show_portfolio(args: list[str], user: User | None) -> None:
     """Отобразить валютные кошельки авторизованного пользователя."""
     if user is None:
@@ -155,7 +180,7 @@ def handle_show_portfolio(args: list[str], user: User | None) -> None:
 
 
 def handle_buy(args: list[str], user: User | None) -> None:
-    """Обработать покупку валюты авторизованным пользователем."""
+    """Обработать команду покупки валюты."""
     if user is None:
         print("Сначала выполните login")
         return
@@ -163,15 +188,14 @@ def handle_buy(args: list[str], user: User | None) -> None:
     try:
         currency_code, amount = parse_trade_args(args, "buy")
         result = buy_currency(user, currency_code, amount)
-
     except (ValueError, TypeError) as error:
         print(error)
         return
 
     print(
-        f"Покупка выполнена: {result['amount']:.4f} "
-        f"{result['currency_code']} по курсу "
-        f"{result['rate']:.2f} USD/{result['currency_code']}"
+        f"Покупка выполнена: "
+        f"{result['amount']:.4f} {result['currency_code']} "
+        f"по курсу {result['rate']:.8g} USD"
     )
 
     print("Изменения в портфеле:")
@@ -181,12 +205,11 @@ def handle_buy(args: list[str], user: User | None) -> None:
         f"стало {result['balance_after']:.4f}"
     )
 
-    print(f"Стоимость покупки: {result['cost_usd']:,.2f} USD")
-    print(f"Остаток USD: {result['usd_balance_after']:,.2f} USD")
+    print(f"Оценочная стоимость покупки: {result['cost_usd']:.2f} USD")
 
 
 def handle_sell(args: list[str], user: User | None) -> None:
-    """Обработать продажу валюты авторизованным пользователем."""
+    """Обработать команду продажи валюты."""
     if user is None:
         print("Сначала выполните login")
         return
@@ -194,15 +217,14 @@ def handle_sell(args: list[str], user: User | None) -> None:
     try:
         currency_code, amount = parse_trade_args(args, "sell")
         result = sell_currency(user, currency_code, amount)
-
     except (ValueError, TypeError) as error:
         print(error)
         return
 
     print(
-        f"Продажа выполнена: {result['amount']:.4f} "
-        f"{result['currency_code']} по курсу "
-        f"{result['rate']:.2f} USD/{result['currency_code']}"
+        f"Продажа выполнена: "
+        f"{result['amount']:.4f} {result['currency_code']} "
+        f"по курсу {result['rate']:.8g} USD"
     )
 
     print("Изменения в портфеле:")
@@ -212,8 +234,25 @@ def handle_sell(args: list[str], user: User | None) -> None:
         f"стало {result['balance_after']:.4f}"
     )
 
-    print(f"Выручка от продажи: {result['revenue_usd']:,.2f} USD")
-    print(f"Баланс USD: {result['usd_balance_after']:,.2f} USD")
+    print(f"Оценочная выручка от продажи: {result['revenue_usd']:.2f} USD")
+
+
+def handle_get_rate(args: list[str]) -> None:
+    """Обработать команду получения валютного курса."""
+    try:
+        from_code, to_code = parse_rate_args(args)
+        result = get_rate_info(from_code, to_code)
+    except (ValueError, TypeError) as error:
+        print(error)
+        return
+
+    rate = result["rate"]
+    rate_text = f"{rate:.10f}".rstrip("0").rstrip(".")
+
+    print(f"Курс: 1 {from_code} = {rate_text} {to_code}")
+    print("Источник: фиксированные котировки (не онлайн)")
+    print(f"Дата снимка котировок: {result['snapshot_date']}")
+    print(f"Время сохранения в JSON: {result['saved_at']} (UTC)")
 
 
 def run_cli() -> None:
@@ -221,7 +260,10 @@ def run_cli() -> None:
     current_user: User | None = None
 
     print("Валютный кошелёк")
-    print("Доступные команды: register, login, show-portfolio, buy, sell, help, exit")
+    print(
+        "Доступные команды: register, login, show-portfolio, "
+        "buy, sell, get-rate, help, exit"
+    )
 
     while True:
         prompt = (
@@ -271,12 +313,16 @@ def run_cli() -> None:
         elif action == "sell":
             handle_sell(args, current_user)
 
+        elif action == "get-rate":
+            handle_get_rate(args)
+
         elif action == "help":
             print("register --username <имя> --password <пароль>")
             print("login --username <имя> --password <пароль>")
             print("show-portfolio [--base <валюта>]")
             print("buy --currency <валюта> --amount <количество>")
             print("sell --currency <валюта> --amount <количество>")
+            print("get-rate --from <валюта> --to <валюта>")
             print("help — показать доступные команды")
             print("exit — завершить работу")
 
