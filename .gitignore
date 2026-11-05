@@ -16,3 +16,6 @@ venv/
 
 # macOS
 .DS_Store
+
+# Application data
+data/
