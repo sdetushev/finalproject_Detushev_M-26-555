@@ -13,6 +13,14 @@ DEFAULT_EXCHANGE_RATES = {
 }
 
 
+class CurrencyNotFoundError(ValueError):
+    """Неизвестный код валюты."""
+
+
+class ExchangeRateNotFoundError(ValueError):
+    """Отсутствует курс для поддерживаемой валюты."""
+
+
 class User:
     """Представлять пользователя валютной платформы."""
 
@@ -202,15 +210,32 @@ class Portfolio:
 
     def __init__(
         self,
-        user: User,
+        user_id: int | User | None = None,
         wallets: dict[str, Wallet] | None = None,
+        user: User | None = None,
     ) -> None:
-        """Инициализировать портфель пользователя."""
-        if not isinstance(user, User):
+        """Создать портфель по ID с необязательным объектом пользователя."""
+        # Поддержка прежнего вызова Portfolio(user, wallets=...).
+        if isinstance(user_id, User):
+            if user is not None:
+                raise ValueError("Пользователь передан дважды")
+            user = user_id
+            user_id = user.user_id
+
+        if user is not None and not isinstance(user, User):
             raise TypeError("Пользователь должен быть объектом User")
 
+        if user_id is None and user is not None:
+            user_id = user.user_id
+
+        if type(user_id) is not int or user_id <= 0:
+            raise ValueError("ID пользователя должен быть положительным целым числом")
+
+        if user is not None and user.user_id != user_id:
+            raise ValueError("ID пользователя не соответствует портфелю")
+
+        self._user_id = user_id
         self._user = user
-        self._user_id = user.user_id
         self._wallets: dict[str, Wallet] = {}
 
         if wallets is not None:
@@ -227,8 +252,8 @@ class Portfolio:
                 self._wallets[currency_code] = wallet
 
     @property
-    def user(self) -> User:
-        """Вернуть пользователя, которому принадлежит портфель."""
+    def user(self) -> User | None:
+        """Вернуть объект владельца портфеля, если он передан."""
         return self._user
 
     @property
@@ -270,27 +295,43 @@ class Portfolio:
     def get_total_value(
         self,
         base_currency: str = "USD",
-        exchange_rates: dict[str, float] | None = None,
+        rates: dict[str, float | dict[str, str | float]] | None = None,
+        *,
+        exchange_rates: dict[str, float | dict[str, str | float]] | None = None,
     ) -> float:
-        """Рассчитать стоимость портфеля в выбранной базовой валюте."""
+        """Рассчитать стоимость портфеля по курсам валют относительно USD."""
         base_code = self._validate_currency_code(base_currency)
 
-        if exchange_rates is None:
-            exchange_rates = DEFAULT_EXCHANGE_RATES
+        if base_code not in DEFAULT_EXCHANGE_RATES:
+            raise CurrencyNotFoundError(f"Неизвестная базовая валюта '{base_code}'")
 
-        if base_code not in exchange_rates:
-            raise ValueError(f"Неизвестная базовая валюта '{base_code}'")
+        if rates is not None and exchange_rates is not None:
+            raise ValueError("Передайте только rates или exchange_rates")
 
-        total_usd = 0.0
+        if rates is None:
+            rates = exchange_rates
 
-        for wallet in self._wallets.values():
-            code = wallet.currency_code
+        if rates is None:
+            rates = DEFAULT_EXCHANGE_RATES
 
-            if code not in exchange_rates:
-                raise ValueError(f"Неизвестная валюта '{code}'")
+        if not isinstance(rates, dict):
+            raise TypeError("Курсы валют должны быть представлены словарём")
 
-            rate = exchange_rates[code]
+        def price_in_usd(code: str) -> float:
+            """Проверить курс валюты относительно USD."""
+            if code == "USD":
+                return 1.0
 
+            # Принимаем подготовленный словарь и пары вида BTC_USD.
+            if code in rates:
+                rate = rates[code]
+            elif f"{code}_USD" in rates:
+                rate = rates[f"{code}_USD"]
+            else:
+                raise ExchangeRateNotFoundError(f"Не найден курс {code}→USD")
+
+            if isinstance(rate, dict):
+                rate = rate.get("rate")
             if (
                 isinstance(rate, bool)
                 or not isinstance(rate, (int, float))
@@ -299,16 +340,19 @@ class Portfolio:
             ):
                 raise ValueError(f"Некорректный курс валюты '{code}'")
 
-            total_usd += wallet.balance * rate
+            return float(rate)
 
-        base_rate = exchange_rates[base_code]
+        base_rate = price_in_usd(base_code)
+        total_usd = 0.0
 
-        if (
-            isinstance(base_rate, bool)
-            or not isinstance(base_rate, (int, float))
-            or not math.isfinite(base_rate)
-            or base_rate <= 0
-        ):
-            raise ValueError(f"Некорректный курс валюты '{base_code}'")
+        for wallet in self._wallets.values():
+            code = wallet.currency_code
+            if code not in DEFAULT_EXCHANGE_RATES:
+                raise CurrencyNotFoundError(f"Неизвестная валюта '{code}'")
+            total_usd += wallet.balance * price_in_usd(code)
 
-        return total_usd / base_rate
+        total = total_usd / base_rate
+        if not math.isfinite(total):
+            raise ValueError("Стоимость портфеля слишком велика")
+
+        return total

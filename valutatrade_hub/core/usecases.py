@@ -1,8 +1,15 @@
 import math
-from datetime import datetime, timezone
+from datetime import datetime
 
 from valutatrade_hub.core import utils
-from valutatrade_hub.core.models import DEFAULT_EXCHANGE_RATES, Portfolio, User, Wallet
+from valutatrade_hub.core.models import (
+    DEFAULT_EXCHANGE_RATES,
+    CurrencyNotFoundError,
+    ExchangeRateNotFoundError,
+    Portfolio,
+    User,
+    Wallet,
+)
 
 
 class InsufficientFundsError(ValueError):
@@ -170,34 +177,31 @@ def save_portfolio(portfolio: Portfolio) -> None:
         utils.save_json("portfolios.json", portfolios)
         return
 
-    raise ValueError(f"Портфель пользователя '{portfolio.user.username}' не найден")
+    raise ValueError(f"Портфель пользователя с ID {portfolio.user_id} не найден")
 
 
 def get_portfolio_summary(
     user: User,
     base_currency: str = "USD",
 ) -> tuple[list[tuple[str, float, float]], float]:
-    """Получить балансы кошельков и их стоимость в базовой валюте."""
+    """Получить балансы и стоимость портфеля по курсам из JSON."""
     portfolio = load_portfolio(user)
+    usd_rates = load_usd_rates()
 
-    total_value = portfolio.get_total_value(base_currency)
+    # Валидация базовой валюты выполняется даже при пустом портфеле.
+    total_value = portfolio.get_total_value(base_currency, rates=usd_rates)
     rows: list[tuple[str, float, float]] = []
 
     for currency_code, wallet in portfolio.wallets.items():
         single_wallet_portfolio = Portfolio(
+            user_id=user.user_id,
             user=user,
             wallets={currency_code: wallet},
         )
-
-        converted_value = single_wallet_portfolio.get_total_value(base_currency)
-
-        rows.append(
-            (
-                currency_code,
-                wallet.balance,
-                converted_value,
-            )
+        converted_value = single_wallet_portfolio.get_total_value(
+            base_currency, rates=usd_rates
         )
+        rows.append((currency_code, wallet.balance, converted_value))
 
     return rows, total_value
 
@@ -221,10 +225,7 @@ def buy_currency(
     ):
         raise ValueError("'amount' должен быть положительным числом")
 
-    if currency_code not in DEFAULT_EXCHANGE_RATES:
-        raise ValueError(f"Не удалось получить курс для {currency_code}→USD")
-
-    rate = DEFAULT_EXCHANGE_RATES[currency_code]
+    rate = _get_usd_rate(currency_code, load_usd_rates())
     estimated_cost_usd = amount * rate
 
     if not math.isfinite(estimated_cost_usd):
@@ -275,15 +276,7 @@ def sell_currency(
     ):
         raise ValueError("'amount' должен быть положительным числом")
 
-    if currency_code not in DEFAULT_EXCHANGE_RATES:
-        raise ValueError(f"Не удалось получить курс для {currency_code}→USD")
-
-    rate = DEFAULT_EXCHANGE_RATES[currency_code]
-    estimated_revenue_usd = amount * rate
-
-    if not math.isfinite(estimated_revenue_usd):
-        raise ValueError("Оценочная выручка слишком велика")
-
+    _normalize_currency(currency_code)
     portfolio = load_portfolio(user)
 
     try:
@@ -300,6 +293,12 @@ def sell_currency(
             f"запрошено {amount:.8g} {currency_code}"
         )
 
+    rate = _get_usd_rate(currency_code, load_usd_rates())
+    estimated_revenue_usd = amount * rate
+
+    if not math.isfinite(estimated_revenue_usd):
+        raise ValueError("Оценочная выручка слишком велика")
+
     wallet.withdraw(amount)
     save_portfolio(portfolio)
 
@@ -313,66 +312,156 @@ def sell_currency(
     }
 
 
-def get_stub_rate(from_currency: str, to_currency: str) -> float:
-    """Рассчитать тестовый курс между двумя валютами через USD."""
-    if (
-        not isinstance(from_currency, str)
-        or not isinstance(to_currency, str)
-        or not from_currency.strip()
-        or not to_currency.strip()
+def _normalize_currency(currency_code: str) -> str:
+    """Проверить, что валюта есть в реестре поддерживаемых."""
+    if not isinstance(currency_code, str) or not currency_code.strip():
+        raise ValueError("Код валюты не может быть пустым")
+
+    code = currency_code.strip().upper()
+    if code not in DEFAULT_EXCHANGE_RATES:
+        raise CurrencyNotFoundError(f"Неизвестная валюта: {code}")
+
+    return code
+
+
+def _read_usd_records() -> dict[str, dict[str, str | float]]:
+    """Прочитать котировки X_USD; при отсутствии создать снимок-заглушку."""
+    utils.initialize_storage()
+    data = utils.load_json("rates.json")
+    if not isinstance(data, dict):
+        raise ValueError("Некорректный формат rates.json")
+
+    # Первая инициализация — фиксированные котировки, не онлайн-обновление.
+    if not data:
+        data = {
+            f"{code}_USD": {
+                "rate": rate,
+                "source": "fixed_snapshot",
+                "snapshot_date": "2026-11-05",
+            }
+            for code, rate in DEFAULT_EXCHANGE_RATES.items()
+            if code != "USD"
+        }
+        utils.save_json("rates.json", data)
+
+    # Совместимость со старым кэшем вида BTC/USD, USD/BTC и EUR/RUB.
+    elif any("/" in key for key in data) and not any(
+        key.endswith("_USD") for key in data
     ):
-        raise ValueError("Коды валют не могут быть пустыми")
+        migrated = {
+            f"{code}_USD": {
+                "rate": rate,
+                "source": "fixed_snapshot",
+                "snapshot_date": "2026-11-05",
+            }
+            for code, rate in DEFAULT_EXCHANGE_RATES.items()
+            if code != "USD"
+        }
+        for code in DEFAULT_EXCHANGE_RATES:
+            if code == "USD":
+                continue
+            direct = data.get(f"{code}/USD")
+            inverse = data.get(f"USD/{code}")
+            if isinstance(direct, dict) and "rate" in direct:
+                migrated[f"{code}_USD"] = direct.copy()
+            elif isinstance(inverse, dict) and "rate" in inverse:
+                inverse_rate = inverse["rate"]
+                if (
+                    isinstance(inverse_rate, bool)
+                    or not isinstance(inverse_rate, (int, float))
+                    or not math.isfinite(inverse_rate)
+                    or inverse_rate <= 0
+                ):
+                    raise ValueError(f"Некорректный курс валюты '{code}'")
+                record = inverse.copy()
+                record["rate"] = 1 / inverse_rate
+                migrated[f"{code}_USD"] = record
+        data = migrated
+        utils.save_json("rates.json", data)
 
-    from_code = from_currency.strip().upper()
-    to_code = to_currency.strip().upper()
+    records: dict[str, dict[str, str | float]] = {
+        "USD": {"rate": 1.0, "source": "base_currency"}
+    }
 
-    if from_code not in DEFAULT_EXCHANGE_RATES:
-        raise ValueError(f"Неизвестная валюта: {from_code}")
+    for code in DEFAULT_EXCHANGE_RATES:
+        if code == "USD":
+            continue
+        entry = data.get(f"{code}_USD")
+        if entry is None:
+            continue
+        if isinstance(entry, (int, float)) and not isinstance(entry, bool):
+            record: dict[str, str | float] = {"rate": entry}
+        elif isinstance(entry, dict):
+            record = entry
+        else:
+            raise ValueError(f"Некорректная запись курса {code}_USD")
 
-    if to_code not in DEFAULT_EXCHANGE_RATES:
-        raise ValueError(f"Неизвестная валюта: {to_code}")
+        rate = record.get("rate")
+        if (
+            isinstance(rate, bool)
+            or not isinstance(rate, (int, float))
+            or not math.isfinite(rate)
+            or rate <= 0
+        ):
+            raise ValueError(f"Некорректный курс валюты '{code}'")
 
-    from_rate_usd = DEFAULT_EXCHANGE_RATES[from_code]
-    to_rate_usd = DEFAULT_EXCHANGE_RATES[to_code]
+        records[code] = record
 
-    return from_rate_usd / to_rate_usd
+    return records
+
+
+def load_usd_rates() -> dict[str, float]:
+    """Вернуть курсы поддерживаемых валют в USD из rates.json."""
+    records = _read_usd_records()
+    return {code: float(record["rate"]) for code, record in records.items()}
+
+
+def _get_usd_rate(code: str, rates: dict[str, float]) -> float:
+    """Получить долларовую котировку поддерживаемой валюты."""
+    code = _normalize_currency(code)
+    if code not in rates:
+        raise ExchangeRateNotFoundError(f"Не найден курс {code}→USD")
+    return rates[code]
+
+
+def get_stub_rate(from_currency: str, to_currency: str) -> float:
+    """Рассчитать курс по фиксированным значениям без обращения к файлам."""
+    from_code = _normalize_currency(from_currency)
+    to_code = _normalize_currency(to_currency)
+    return DEFAULT_EXCHANGE_RATES[from_code] / DEFAULT_EXCHANGE_RATES[to_code]
 
 
 def get_rate_info(
     from_currency: str,
     to_currency: str,
 ) -> dict[str, str | float]:
-    """Получить фиксированный курс и сохранить его в JSON."""
-    rate = get_stub_rate(from_currency, to_currency)
+    """Получить прямой и обратный курсы из сохранённых котировок USD."""
+    from_code = _normalize_currency(from_currency)
+    to_code = _normalize_currency(to_currency)
+    records = _read_usd_records()
+    rates = {code: float(record["rate"]) for code, record in records.items()}
 
-    from_code = from_currency.strip().upper()
-    to_code = to_currency.strip().upper()
-    pair = f"{from_code}/{to_code}"
+    from_usd = _get_usd_rate(from_code, rates)
+    to_usd = _get_usd_rate(to_code, rates)
+    direct_rate = from_usd / to_usd
+    reverse_rate = to_usd / from_usd
 
-    rates = utils.load_json("rates.json")
+    if not math.isfinite(direct_rate) or not math.isfinite(reverse_rate):
+        raise ValueError("Не удалось рассчитать курс валютной пары")
 
-    if not isinstance(rates, dict):
-        raise ValueError("Некорректный формат rates.json")
+    # Для USD↔X источник и дата определяются котировкой X_USD.
+    # Для X↔Y даты обоих исходных курсов должны совпадать.
+    affected = [code for code in (from_code, to_code) if code != "USD"]
+    if not affected:
+        affected = ["USD"]
+    sources = {str(records[code].get("source", "unknown")) for code in affected}
+    dates = {str(records[code].get("snapshot_date", "")) for code in affected}
+    saved_times = {str(records[code].get("saved_at", "")) for code in affected}
 
-    cached = rates.get(pair)
-
-    if (
-        isinstance(cached, dict)
-        and cached.get("rate") == rate
-        and cached.get("source") == "fixed_snapshot"
-        and cached.get("snapshot_date") == "2026-11-05"
-        and isinstance(cached.get("saved_at"), str)
-    ):
-        return cached
-
-    rate_info = {
-        "rate": rate,
-        "source": "fixed_snapshot",
-        "snapshot_date": "2026-11-05",
-        "saved_at": datetime.now(timezone.utc).isoformat(),
+    return {
+        "rate": direct_rate,
+        "reverse_rate": reverse_rate,
+        "source": sources.pop() if len(sources) == 1 else "mixed_sources",
+        "snapshot_date": dates.pop() if len(dates) == 1 else "разные даты",
+        "saved_at": saved_times.pop() if len(saved_times) == 1 else "",
     }
-
-    rates[pair] = rate_info
-    utils.save_json("rates.json", rates)
-
-    return rate_info
