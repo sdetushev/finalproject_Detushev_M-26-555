@@ -1,5 +1,5 @@
 import math
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from valutatrade_hub.core import utils
 from valutatrade_hub.core.models import (
@@ -325,9 +325,10 @@ def _normalize_currency(currency_code: str) -> str:
 
 
 def _read_usd_records() -> dict[str, dict[str, str | float]]:
-    """Прочитать котировки X_USD; при отсутствии создать снимок-заглушку."""
+    """Прочитать котировки X_USD и обновить устаревший кэш."""
     utils.initialize_storage()
     data = utils.load_json("rates.json")
+
     if not isinstance(data, dict):
         raise ValueError("Некорректный формат rates.json")
 
@@ -357,15 +358,20 @@ def _read_usd_records() -> dict[str, dict[str, str | float]]:
             for code, rate in DEFAULT_EXCHANGE_RATES.items()
             if code != "USD"
         }
+
         for code in DEFAULT_EXCHANGE_RATES:
             if code == "USD":
                 continue
+
             direct = data.get(f"{code}/USD")
             inverse = data.get(f"USD/{code}")
+
             if isinstance(direct, dict) and "rate" in direct:
                 migrated[f"{code}_USD"] = direct.copy()
+
             elif isinstance(inverse, dict) and "rate" in inverse:
                 inverse_rate = inverse["rate"]
+
                 if (
                     isinstance(inverse_rate, bool)
                     or not isinstance(inverse_rate, (int, float))
@@ -373,9 +379,11 @@ def _read_usd_records() -> dict[str, dict[str, str | float]]:
                     or inverse_rate <= 0
                 ):
                     raise ValueError(f"Некорректный курс валюты '{code}'")
+
                 record = inverse.copy()
                 record["rate"] = 1 / inverse_rate
                 migrated[f"{code}_USD"] = record
+
         data = migrated
         utils.save_json("rates.json", data)
 
@@ -386,17 +394,23 @@ def _read_usd_records() -> dict[str, dict[str, str | float]]:
     for code in DEFAULT_EXCHANGE_RATES:
         if code == "USD":
             continue
+
         entry = data.get(f"{code}_USD")
+
         if entry is None:
             continue
+
         if isinstance(entry, (int, float)) and not isinstance(entry, bool):
             record: dict[str, str | float] = {"rate": entry}
+
         elif isinstance(entry, dict):
             record = entry
+
         else:
             raise ValueError(f"Некорректная запись курса {code}_USD")
 
         rate = record.get("rate")
+
         if (
             isinstance(rate, bool)
             or not isinstance(rate, (int, float))
@@ -406,6 +420,46 @@ def _read_usd_records() -> dict[str, dict[str, str | float]]:
             raise ValueError(f"Некорректный курс валюты '{code}'")
 
         records[code] = record
+
+    # Проверяем срок актуальности локального кэша.
+    now = datetime.now(timezone.utc)
+    cache_changed = False
+
+    for code, record in records.items():
+        if code == "USD":
+            continue
+
+        saved_at = record.get("saved_at")
+        is_fresh = False
+
+        if isinstance(saved_at, str):
+            try:
+                saved_time = datetime.fromisoformat(saved_at)
+
+                if saved_time.tzinfo is not None:
+                    age = now - saved_time
+                    is_fresh = timedelta(0) <= age < timedelta(minutes=5)
+
+            except ValueError:
+                pass
+
+        if is_fresh:
+            continue
+
+        # Пока Parser Service отсутствует, используем заглушку.
+        fresh_record: dict[str, str | float] = {
+            "rate": DEFAULT_EXCHANGE_RATES[code],
+            "source": "fixed_snapshot",
+            "snapshot_date": "2026-11-05",
+            "saved_at": now.isoformat(),
+        }
+
+        data[f"{code}_USD"] = fresh_record
+        records[code] = fresh_record
+        cache_changed = True
+
+    if cache_changed:
+        utils.save_json("rates.json", data)
 
     return records
 
