@@ -238,7 +238,7 @@ def handle_sell(args: list[str], user: User | None) -> None:
 
 
 def handle_get_rate(args: list[str]) -> None:
-    """Обработать команду получения валютного курса."""
+    """Показать прямой и обратный курсы без промежуточного округления."""
     try:
         from_code, to_code = parse_rate_args(args)
         result = get_rate_info(from_code, to_code)
@@ -246,13 +246,25 @@ def handle_get_rate(args: list[str]) -> None:
         print(error)
         return
 
-    rate = result["rate"]
-    rate_text = f"{rate:.10f}".rstrip("0").rstrip(".")
+    def format_rate(rate: float) -> str:
+        """Форматировать валютный курс без лишних знаков."""
+        precision = 8 if rate >= 1 else 12
+        text = f"{rate:.{precision}f}".rstrip("0").rstrip(".")
+        return text if text and text != "0" else f"{rate:.12g}"
 
-    print(f"Курс: 1 {from_code} = {rate_text} {to_code}")
-    print("Источник: фиксированные котировки (не онлайн)")
-    print(f"Дата снимка котировок: {result['snapshot_date']}")
-    print(f"Время сохранения в JSON: {result['saved_at']} (UTC)")
+    print(f"Курс {from_code}→{to_code}: {format_rate(result['rate'])}")
+    print(f"Обратный курс {to_code}→{from_code}: {format_rate(result['reverse_rate'])}")
+
+    source = result["source"]
+    if source == "fixed_snapshot":
+        print("Источник: фиксированные котировки (не онлайн)")
+    else:
+        print(f"Источник: {source}")
+
+    if result["snapshot_date"]:
+        print(f"Дата снимка котировок: {result['snapshot_date']}")
+    if result["saved_at"]:
+        print(f"Время сохранения в JSON: {result['saved_at']} (UTC)")
 
 
 def run_cli() -> None:
