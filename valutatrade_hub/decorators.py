@@ -1,5 +1,6 @@
 import inspect
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
@@ -7,6 +8,22 @@ from valutatrade_hub.logging_config import configure_logging
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+
+_ACTION_CONTEXT: ContextVar[dict[str, Any] | None] = ContextVar(
+    "valutatrade_action_context",
+    default=None,
+)
+
+
+def add_log_context(**fields: Any) -> None:
+    """Дополнить журнал сведениями, полученными во время операции."""
+    context = _ACTION_CONTEXT.get()
+
+    if context is not None:
+        context.update(
+            {key: value for key, value in fields.items() if value is not None}
+        )
 
 
 def _format_log_fields(fields: dict[str, Any]) -> str:
@@ -72,7 +89,15 @@ def log_action(
                 "username": username,
                 "currency_code": parameters.get("currency_code"),
                 "amount": parameters.get("amount"),
+                "base": (
+                    "USD"
+                    if action.upper() in ("BUY", "SELL")
+                    else parameters.get("base")
+                ),
             }
+
+            details: dict[str, Any] = {}
+            token = _ACTION_CONTEXT.set(details)
 
             try:
                 result = func(*args, **kwargs)
@@ -80,6 +105,7 @@ def log_action(
             except Exception as error:
                 error_fields = {
                     **fields,
+                    **details,
                     "result": "ERROR",
                     "error_type": type(error).__name__,
                     "error_message": str(error),
@@ -88,12 +114,15 @@ def log_action(
                 logger.info(_format_log_fields(error_fields))
                 raise
 
+            finally:
+                _ACTION_CONTEXT.reset(token)
+
             # Дополнительные сведения из результата операции.
             for field in ("rate", "base"):
                 value = _get_result_field(result, field)
 
                 if value is None:
-                    value = parameters.get(field)
+                    value = details.get(field, parameters.get(field))
 
                 if value is not None:
                     fields[field] = value

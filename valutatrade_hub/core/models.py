@@ -4,6 +4,9 @@ import math
 import secrets
 from datetime import datetime, timezone
 
+from valutatrade_hub.core.currencies import get_currency
+from valutatrade_hub.core.exceptions import InsufficientFundsError
+
 DEFAULT_EXCHANGE_RATES = {
     "USD": 1.0,
     "EUR": 1.1267,
@@ -11,10 +14,6 @@ DEFAULT_EXCHANGE_RATES = {
     "RUB": 1 / 81.6699,
     "ETH": 2424.46,
 }
-
-
-class CurrencyNotFoundError(ValueError):
-    """Неизвестный код валюты."""
 
 
 class ExchangeRateNotFoundError(ValueError):
@@ -145,7 +144,7 @@ class Wallet:
         if not isinstance(currency_code, str) or not currency_code.strip():
             raise ValueError("Код валюты не может быть пустым")
 
-        self.currency_code = currency_code.strip().upper()
+        self.currency_code = get_currency(currency_code).code
         self._balance = 0.0
         self.balance = balance
 
@@ -189,10 +188,10 @@ class Wallet:
         self._validate_amount(amount)
 
         if amount > self.balance:
-            raise ValueError(
-                f"Недостаточно средств: доступно {self.balance:.4f} "
-                f"{self.currency_code}, требуется {amount:.4f} "
-                f"{self.currency_code}"
+            raise InsufficientFundsError(
+                available=self.balance,
+                required=amount,
+                code=self.currency_code,
             )
 
         self.balance -= amount
@@ -268,11 +267,11 @@ class Portfolio:
 
     @staticmethod
     def _validate_currency_code(currency_code: str) -> str:
-        """Проверить и нормализовать код валюты."""
+        """Проверить код валюты через единый реестр."""
         if not isinstance(currency_code, str) or not currency_code.strip():
             raise ValueError("Код валюты не может быть пустым")
 
-        return currency_code.strip().upper()
+        return get_currency(currency_code).code
 
     def add_currency(self, currency_code: str) -> None:
         """Добавить новый валютный кошелёк в портфель."""
@@ -301,9 +300,6 @@ class Portfolio:
     ) -> float:
         """Рассчитать стоимость портфеля по курсам валют относительно USD."""
         base_code = self._validate_currency_code(base_currency)
-
-        if base_code not in DEFAULT_EXCHANGE_RATES:
-            raise CurrencyNotFoundError(f"Неизвестная базовая валюта '{base_code}'")
 
         if rates is not None and exchange_rates is not None:
             raise ValueError("Передайте только rates или exchange_rates")
@@ -347,8 +343,6 @@ class Portfolio:
 
         for wallet in self._wallets.values():
             code = wallet.currency_code
-            if code not in DEFAULT_EXCHANGE_RATES:
-                raise CurrencyNotFoundError(f"Неизвестная валюта '{code}'")
             total_usd += wallet.balance * price_in_usd(code)
 
         total = total_usd / base_rate
