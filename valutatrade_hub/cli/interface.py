@@ -17,6 +17,7 @@ from valutatrade_hub.core.usecases import (
     register_user,
     sell_currency,
 )
+from valutatrade_hub.infra.settings import SettingsLoader
 
 
 def print_currency_error(error: CurrencyNotFoundError) -> None:
@@ -87,7 +88,7 @@ def handle_login(args: list[str]) -> User | None:
 def parse_portfolio_args(args: list[str]) -> str:
     """Разобрать базовую валюту для просмотра портфеля."""
     if not args:
-        return "USD"
+        return SettingsLoader().get("default_base_currency").strip().upper()
 
     if len(args) != 2 or args[0] != "--base":
         raise ValueError("Использование: show-portfolio [--base <валюта>]")
