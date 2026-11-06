@@ -2,7 +2,10 @@ import math
 from datetime import datetime, timedelta, timezone
 
 from valutatrade_hub.core import utils
-from valutatrade_hub.core.exceptions import ApiRequestError
+from valutatrade_hub.core.exceptions import (
+    ApiRequestError,
+    InsufficientFundsError,
+)
 from valutatrade_hub.core.models import (
     DEFAULT_EXCHANGE_RATES,
     ExchangeRateNotFoundError,
@@ -62,7 +65,7 @@ def register_user(username: str, password: str) -> User:
             },
         ]
 
-    utils.update_json("users.json", add_user)
+    utils.update_json(SettingsLoader().get("users_file"), add_user)
 
     if created_user is None:
         raise RuntimeError("Не удалось создать пользователя")
@@ -87,7 +90,7 @@ def register_user(username: str, password: str) -> User:
         ]
 
     try:
-        utils.update_json("portfolios.json", add_portfolio)
+        utils.update_json(SettingsLoader().get("portfolios_file"), add_portfolio)
 
     except Exception:
         # Компенсация ошибки: удаляем только созданного пользователя.
@@ -106,12 +109,13 @@ def register_user(username: str, password: str) -> User:
             ]
 
         try:
-            utils.update_json("users.json", rollback_user)
+            utils.update_json(SettingsLoader().get("users_file"), rollback_user)
 
         except Exception as rollback_error:
             raise RuntimeError(
-                "Не удалось отменить регистрацию. "
-                "Проверьте users.json и portfolios.json"
+                "Не удалось отменить регистрацию. Проверьте "
+                f"{SettingsLoader().get('users_file')} и "
+                f"{SettingsLoader().get('portfolios_file')}"
             ) from rollback_error
 
         raise
@@ -127,7 +131,7 @@ def login_user(username: str, password: str) -> User:
         raise ValueError("Имя пользователя не может быть пустым")
 
     username = username.strip()
-    users = utils.load_json("users.json")
+    users = utils.load_json(SettingsLoader().get("users_file"))
 
     if not isinstance(users, list):
         raise ValueError("Некорректный формат файла пользователей")
@@ -158,7 +162,7 @@ def load_portfolio(user: User) -> Portfolio:
         raise TypeError("Пользователь должен быть объектом User")
 
     utils.initialize_storage()
-    portfolios = utils.load_json("portfolios.json")
+    portfolios = utils.load_json(SettingsLoader().get("portfolios_file"))
 
     if not isinstance(portfolios, list):
         raise ValueError("Некорректный формат файла портфелей")
@@ -222,14 +226,17 @@ def save_portfolio(portfolio: Portfolio) -> None:
 
         raise ValueError(f"Портфель пользователя с ID {portfolio.user_id} не найден")
 
-    utils.update_json("portfolios.json", update_portfolios)
+    utils.update_json(SettingsLoader().get("portfolios_file"), update_portfolios)
 
 
 def get_portfolio_summary(
     user: User,
-    base_currency: str = "USD",
+    base_currency: str | None = None,
 ) -> tuple[list[tuple[str, float, float]], float]:
     """Получить балансы и стоимость портфеля по курсам из JSON."""
+    if base_currency is None:
+        base_currency = SettingsLoader().get("default_base_currency").strip().upper()
+
     portfolio = load_portfolio(user)
     usd_rates = load_usd_rates()
 
@@ -331,7 +338,10 @@ def buy_currency(
 
         raise ValueError(f"Портфель пользователя с ID {user_id} не найден")
 
-    utils.update_json("portfolios.json", update_portfolio)
+    utils.update_json(
+        SettingsLoader().get("portfolios_file"),
+        update_portfolio,
+    )
 
     return {
         "currency_code": code,
@@ -393,7 +403,11 @@ def sell_currency(
             wallet_data = wallets_data.get(code)
 
             if wallet_data is None:
-                raise ValueError(f"У вас нет кошелька '{code}'")
+                raise InsufficientFundsError(
+                    available=0.0,
+                    required=amount,
+                    code=code,
+                )
 
             if not isinstance(wallet_data, dict) or "balance" not in wallet_data:
                 raise ValueError(f"Некорректные данные кошелька '{code}'")
@@ -422,7 +436,7 @@ def sell_currency(
 
         raise ValueError(f"Портфель пользователя с ID {user_id} не найден")
 
-    utils.update_json("portfolios.json", update_portfolio)
+    utils.update_json(SettingsLoader().get("portfolios_file"), update_portfolio)
 
     return {
         "currency_code": code,
@@ -575,7 +589,7 @@ def _read_usd_records() -> dict[str, dict[str, str | float]]:
 
         return data
 
-    utils.update_json("rates.json", update_rates)
+    utils.update_json(SettingsLoader().get("rates_file"), update_rates)
 
     return records
 
