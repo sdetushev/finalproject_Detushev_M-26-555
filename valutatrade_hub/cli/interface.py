@@ -2,6 +2,12 @@ import shlex
 
 from prettytable import PrettyTable
 
+from valutatrade_hub.core.currencies import CURRENCY_REGISTRY
+from valutatrade_hub.core.exceptions import (
+    ApiRequestError,
+    CurrencyNotFoundError,
+    InsufficientFundsError,
+)
 from valutatrade_hub.core.models import User
 from valutatrade_hub.core.usecases import (
     buy_currency,
@@ -11,6 +17,18 @@ from valutatrade_hub.core.usecases import (
     register_user,
     sell_currency,
 )
+
+
+def print_currency_error(error: CurrencyNotFoundError) -> None:
+    """Показать ошибку валюты и список поддерживаемых кодов."""
+    print(error)
+    print("Поддерживаемые валюты: " + ", ".join(sorted(CURRENCY_REGISTRY)))
+
+
+def print_api_error(error: ApiRequestError) -> None:
+    """Показать сообщение о недоступности источника курсов."""
+    print(error)
+    print("Повторите попытку позже или проверьте подключение к сети.")
 
 
 def parse_auth_args(args: list[str], command: str) -> tuple[str, str]:
@@ -148,6 +166,17 @@ def handle_show_portfolio(args: list[str], user: User | None) -> None:
         base_currency = parse_portfolio_args(args)
         rows, total = get_portfolio_summary(user, base_currency)
 
+    except CurrencyNotFoundError as error:
+        if error.code == base_currency:
+            print(f"Неизвестная базовая валюта '{error.code}'")
+        else:
+            print_currency_error(error)
+        return
+
+    except ApiRequestError as error:
+        print_api_error(error)
+        return
+
     except (ValueError, TypeError) as error:
         print(error)
         return
@@ -187,7 +216,16 @@ def handle_buy(args: list[str], user: User | None) -> None:
 
     try:
         currency_code, amount = parse_trade_args(args, "buy")
-        result = buy_currency(user, currency_code, amount)
+        result = buy_currency(user.user_id, currency_code, amount)
+
+    except CurrencyNotFoundError as error:
+        print_currency_error(error)
+        return
+
+    except ApiRequestError as error:
+        print_api_error(error)
+        return
+
     except (ValueError, TypeError) as error:
         print(error)
         return
@@ -216,7 +254,20 @@ def handle_sell(args: list[str], user: User | None) -> None:
 
     try:
         currency_code, amount = parse_trade_args(args, "sell")
-        result = sell_currency(user, currency_code, amount)
+        result = sell_currency(user.user_id, currency_code, amount)
+
+    except InsufficientFundsError as error:
+        print(error)
+        return
+
+    except CurrencyNotFoundError as error:
+        print_currency_error(error)
+        return
+
+    except ApiRequestError as error:
+        print_api_error(error)
+        return
+
     except (ValueError, TypeError) as error:
         print(error)
         return
@@ -242,6 +293,15 @@ def handle_get_rate(args: list[str]) -> None:
     try:
         from_code, to_code = parse_rate_args(args)
         result = get_rate_info(from_code, to_code)
+
+    except CurrencyNotFoundError as error:
+        print_currency_error(error)
+        return
+
+    except ApiRequestError as error:
+        print_api_error(error)
+        return
+
     except (ValueError, TypeError) as error:
         print(error)
         return
@@ -263,6 +323,10 @@ def handle_get_rate(args: list[str]) -> None:
 
     if result["snapshot_date"]:
         print(f"Дата снимка котировок: {result['snapshot_date']}")
+
+    if result["updated_at"]:
+        print(f"Время получения исходных курсов: {result['updated_at']} (UTC)")
+
     if result["saved_at"]:
         print(f"Время сохранения в JSON: {result['saved_at']} (UTC)")
 

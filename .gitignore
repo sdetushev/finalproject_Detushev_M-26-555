@@ -19,3 +19,6 @@ venv/
 
 # Application data
 data/
+
+# Runtime logs
+logs/

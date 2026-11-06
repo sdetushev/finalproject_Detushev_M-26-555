@@ -1,33 +1,60 @@
-import json
-from pathlib import Path
+import math
+from collections.abc import Callable
 from typing import Any
 
-DATA_DIR = Path("data")
+from valutatrade_hub.core.currencies import get_currency
+from valutatrade_hub.infra.database import DatabaseManager
 
-INITIAL_DATA: dict[str, list[Any] | dict[str, Any]] = {
-    "users.json": [],
-    "portfolios.json": [],
-    "rates.json": {},
-}
+JsonData = list[Any] | dict[str, Any]
+
+
+def normalize_currency_code(currency_code: str) -> str:
+    """Проверить и нормализовать код через единый реестр валют."""
+    if not isinstance(currency_code, str) or not currency_code.strip():
+        raise ValueError("Код валюты не может быть пустым")
+
+    return get_currency(currency_code).code
+
+
+def convert_amount(
+    amount: float,
+    from_usd_rate: float,
+    to_usd_rate: float,
+) -> float:
+    """Конвертировать сумму по котировкам к USD без округления."""
+    if (
+        isinstance(amount, bool)
+        or not isinstance(amount, (int, float))
+        or not math.isfinite(amount)
+        or amount < 0
+    ):
+        raise ValueError("Сумма должна быть неотрицательным конечным числом")
+
+    for rate in (from_usd_rate, to_usd_rate):
+        if (
+            isinstance(rate, bool)
+            or not isinstance(rate, (int, float))
+            or not math.isfinite(rate)
+            or rate <= 0
+        ):
+            raise ValueError("Курс должен быть положительным конечным числом")
+
+    result = amount * from_usd_rate / to_usd_rate
+
+    if not math.isfinite(result):
+        raise ValueError("Результат конвертации слишком велик")
+
+    return float(result)
 
 
 def initialize_storage() -> None:
-    """Создать каталог и JSON-файлы при их отсутствии."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    for filename, initial_data in INITIAL_DATA.items():
-        path = DATA_DIR / filename
-
-        if not path.exists():
-            save_json(filename, initial_data)
+    """Создать отсутствующие JSON-файлы через DatabaseManager."""
+    DatabaseManager().initialize_storage()
 
 
-def load_json(filename: str) -> list[Any] | dict[str, Any]:
-    """Загрузить данные из JSON-файла."""
-    path = DATA_DIR / filename
-
-    with path.open("r", encoding="utf-8") as file:
-        data = json.load(file)
+def load_json(filename: str) -> JsonData:
+    """Прочитать JSON-файл через DatabaseManager."""
+    data = DatabaseManager().read_json(filename)
 
     if not isinstance(data, (list, dict)):
         raise ValueError(f"Некорректный формат данных в файле '{filename}'")
@@ -35,12 +62,30 @@ def load_json(filename: str) -> list[Any] | dict[str, Any]:
     return data
 
 
-def save_json(filename: str, data: list[Any] | dict[str, Any]) -> None:
-    """Сохранить данные в JSON-файл."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+def save_json(filename: str, data: JsonData) -> None:
+    """Безопасно сохранить данные через DatabaseManager."""
+    if not isinstance(data, (list, dict)):
+        raise TypeError("Данные для JSON должны быть списком или словарём")
 
-    path = DATA_DIR / filename
+    DatabaseManager().write_json(filename, data)
 
-    with path.open("w", encoding="utf-8") as file:
-        json.dump(data, file, ensure_ascii=False, indent=4)
-        file.write("\n")
+
+def update_json(
+    filename: str,
+    transform: Callable[[JsonData], JsonData],
+) -> JsonData:
+    """Безопасно выполнить чтение, изменение и запись JSON."""
+
+    def checked_transform(data: Any) -> JsonData:
+        """Проверить структуру до и после изменения данных."""
+        if not isinstance(data, (list, dict)):
+            raise ValueError(f"Некорректный формат данных в файле '{filename}'")
+
+        updated = transform(data)
+
+        if not isinstance(updated, (list, dict)):
+            raise ValueError("Результат обновления должен быть списком или словарём")
+
+        return updated
+
+    return DatabaseManager().update_json(filename, checked_transform)
