@@ -51,6 +51,7 @@ users_file = "users.json"
 portfolios_file = "portfolios.json"
 rates_file = "rates.json"
 exchange_rates_file = "exchange_rates.json"
+rates_update_interval_seconds = 300
 
 rates_ttl_seconds = 300
 default_base_currency = "USD"
