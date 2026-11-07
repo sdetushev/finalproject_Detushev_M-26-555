@@ -238,7 +238,13 @@ def get_portfolio_summary(
         base_currency = SettingsLoader().get("default_base_currency").strip().upper()
 
     portfolio = load_portfolio(user)
-    usd_rates = load_usd_rates()
+
+    usd_rates = load_usd_rates(
+        required_codes=(
+            *portfolio.wallets.keys(),
+            base_currency,
+        )
+    )
 
     # Валидация базовой валюты выполняется даже при пустом портфеле.
     total_value = portfolio.get_total_value(base_currency, rates=usd_rates)
@@ -278,7 +284,10 @@ def buy_currency(
     ):
         raise ValueError("'amount' должен быть положительным числом")
 
-    rate = _get_usd_rate(code, load_usd_rates())
+    rate = _get_usd_rate(
+        code,
+        load_usd_rates(required_codes=(code,)),
+    )
     add_log_context(rate=rate, base="USD")
     estimated_cost_usd = amount * rate
 
@@ -374,7 +383,10 @@ def sell_currency(
     ):
         raise ValueError("'amount' должен быть положительным числом")
 
-    rate = _get_usd_rate(code, load_usd_rates())
+    rate = _get_usd_rate(
+        code,
+        load_usd_rates(required_codes=(code,)),
+    )
     add_log_context(rate=rate, base="USD")
     estimated_revenue_usd = amount * rate
 
@@ -454,8 +466,97 @@ def _normalize_currency(currency_code: str) -> str:
     return utils.normalize_currency_code(currency_code)
 
 
-def _read_usd_records() -> dict[str, dict[str, str | float]]:
-    """Прочитать котировки X_USD и обновить устаревший кэш."""
+def _read_parser_records(
+    data: dict,
+    required_codes: tuple[str, ...],
+) -> dict[str, dict[str, str | float]]:
+    """Прочитать курсы Parser Service и проверить свежесть нужных пар."""
+    pairs = data.get("pairs")
+
+    if not isinstance(pairs, dict):
+        raise ValueError("Поле pairs в rates.json должно быть словарём")
+
+    records: dict[str, dict[str, str | float]] = {
+        "USD": {
+            "rate": 1.0,
+            "source": "base_currency",
+        }
+    }
+
+    for pair, entry in pairs.items():
+        if not isinstance(pair, str) or not pair.endswith("_USD"):
+            continue
+
+        code = pair.removesuffix("_USD")
+
+        if not isinstance(entry, dict):
+            raise ValueError(f"Некорректная запись курса {pair}")
+
+        rate = entry.get("rate")
+
+        if (
+            isinstance(rate, bool)
+            or not isinstance(rate, (int, float))
+            or not math.isfinite(rate)
+            or rate <= 0
+        ):
+            raise ValueError(f"Некорректный курс валюты '{code}'")
+
+        records[code] = {
+            **entry,
+            "rate": float(rate),
+        }
+
+    now = datetime.now(timezone.utc)
+    ttl = timedelta(seconds=SettingsLoader().get("rates_ttl_seconds"))
+
+    for currency_code in required_codes:
+        code = _normalize_currency(currency_code)
+
+        if code == "USD":
+            continue
+
+        record = records.get(code)
+
+        if record is None:
+            raise ExchangeRateNotFoundError(f"Не найден курс {code}→USD")
+
+        raw_time = record.get("saved_at")
+        is_fresh = False
+
+        if isinstance(raw_time, str):
+            try:
+                saved_time = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+
+                if saved_time.tzinfo is not None:
+                    age = now - saved_time
+                    is_fresh = timedelta(0) <= age < ttl
+
+            except ValueError:
+                pass
+
+        if not is_fresh:
+            raise ApiRequestError(
+                f"Курс {code}→USD устарел. "
+                "Выполните 'update-rates', чтобы обновить данные"
+            )
+
+    return records
+
+
+def _read_usd_records(
+    required_codes: tuple[str, ...] = (),
+) -> dict[str, dict[str, str | float]]:
+    """Прочитать котировки из нового или прежнего формата кэша."""
+    data = utils.load_json(SettingsLoader().get("rates_file"))
+
+    if not isinstance(data, dict):
+        raise ValueError("Некорректный формат rates.json")
+
+    if "pairs" in data:
+        return _read_parser_records(data, required_codes)
+
+    # Ниже остаётся прежняя логика этапа 3.
     now = datetime.now(timezone.utc)
     ttl_seconds = SettingsLoader().get("rates_ttl_seconds")
     ttl = timedelta(seconds=ttl_seconds)
@@ -594,9 +695,12 @@ def _read_usd_records() -> dict[str, dict[str, str | float]]:
     return records
 
 
-def load_usd_rates() -> dict[str, float]:
-    """Вернуть курсы поддерживаемых валют в USD из rates.json."""
-    records = _read_usd_records()
+def load_usd_rates(
+    required_codes: tuple[str, ...] = (),
+) -> dict[str, float]:
+    """Вернуть долларовые котировки из локального кэша."""
+    records = _read_usd_records(required_codes)
+
     return {code: float(record["rate"]) for code, record in records.items()}
 
 
@@ -622,7 +726,7 @@ def get_rate_info(
     """Получить прямой и обратный курсы из сохранённых котировок USD."""
     from_code = _normalize_currency(from_currency)
     to_code = _normalize_currency(to_currency)
-    records = _read_usd_records()
+    records = _read_usd_records(required_codes=(from_code, to_code))
     rates = {code: float(record["rate"]) for code, record in records.items()}
 
     from_usd = _get_usd_rate(from_code, rates)

@@ -1,14 +1,19 @@
+import math
 import shlex
+from datetime import datetime, timedelta, timezone
 
 from prettytable import PrettyTable
 
-from valutatrade_hub.core.currencies import CURRENCY_REGISTRY
+from valutatrade_hub.core.currencies import CURRENCY_REGISTRY, CryptoCurrency
 from valutatrade_hub.core.exceptions import (
     ApiRequestError,
     CurrencyNotFoundError,
     InsufficientFundsError,
 )
-from valutatrade_hub.core.models import User
+from valutatrade_hub.core.models import (
+    ExchangeRateNotFoundError,
+    User,
+)
 from valutatrade_hub.core.usecases import (
     buy_currency,
     get_portfolio_summary,
@@ -18,6 +23,16 @@ from valutatrade_hub.core.usecases import (
     sell_currency,
 )
 from valutatrade_hub.infra.settings import SettingsLoader
+from valutatrade_hub.parser_service.api_clients import (
+    CoinGeckoClient,
+    ExchangeRateApiClient,
+)
+from valutatrade_hub.parser_service.config import ParserConfig
+from valutatrade_hub.parser_service.storage import RatesStorage
+from valutatrade_hub.parser_service.updater import (
+    SOURCE_NAMES,
+    RatesUpdater,
+)
 
 
 def print_currency_error(error: CurrencyNotFoundError) -> None:
@@ -30,6 +45,15 @@ def print_api_error(error: ApiRequestError) -> None:
     """Показать сообщение о недоступности источника курсов."""
     print(error)
     print("Повторите попытку позже или проверьте подключение к сети.")
+
+
+def print_rate_error(error: ExchangeRateNotFoundError) -> None:
+    """Показать ошибку отсутствующего курса и способ обновления."""
+    print(error)
+    print(
+        "Курс отсутствует в локальном кэше. "
+        "Выполните 'update-rates', чтобы загрузить данные."
+    )
 
 
 def parse_auth_args(args: list[str], command: str) -> tuple[str, str]:
@@ -157,6 +181,70 @@ def parse_rate_args(args: list[str]) -> tuple[str, str]:
     return options["--from"], options["--to"]
 
 
+def parse_update_rates_args(args: list[str]) -> str | None:
+    """Разобрать параметры команды обновления валютных курсов."""
+    usage = "Использование: update-rates [--source coingecko|exchangerate]"
+
+    if not args:
+        return None
+
+    if len(args) != 2 or args[0] != "--source":
+        raise ValueError(usage)
+
+    source = args[1].strip().lower()
+
+    if source not in SOURCE_NAMES:
+        raise ValueError(
+            f"Неизвестный источник '{args[1]}'. "
+            "Доступные источники: coingecko, exchangerate"
+        )
+
+    return source
+
+
+def parse_show_rates_args(
+    args: list[str],
+) -> tuple[str | None, int | None, str]:
+    """Разобрать фильтры команды show-rates."""
+    usage = "Использование: show-rates [--currency CODE] [--top N] [--base CODE]"
+
+    if len(args) % 2 != 0:
+        raise ValueError(usage)
+
+    options: dict[str, str] = {}
+    allowed = {"--currency", "--top", "--base"}
+
+    for index in range(0, len(args), 2):
+        flag, value = args[index], args[index + 1]
+
+        if flag not in allowed or flag in options or not value.strip():
+            raise ValueError(usage)
+
+        options[flag] = value.strip()
+
+    currency = options.get("--currency")
+    if currency is not None:
+        currency = currency.upper()
+
+    base = options.get(
+        "--base",
+        SettingsLoader().get("default_base_currency", "USD"),
+    ).upper()
+
+    top: int | None = None
+
+    if "--top" in options:
+        try:
+            top = int(options["--top"])
+        except ValueError as error:
+            raise ValueError("Параметр --top должен быть целым числом") from error
+
+        if top <= 0:
+            raise ValueError("Параметр --top должен быть положительным")
+
+    return currency, top, base
+
+
 def handle_show_portfolio(args: list[str], user: User | None) -> None:
     """Отобразить валютные кошельки авторизованного пользователя."""
     if user is None:
@@ -176,6 +264,10 @@ def handle_show_portfolio(args: list[str], user: User | None) -> None:
 
     except ApiRequestError as error:
         print_api_error(error)
+        return
+
+    except ExchangeRateNotFoundError as error:
+        print_rate_error(error)
         return
 
     except (ValueError, TypeError) as error:
@@ -227,6 +319,10 @@ def handle_buy(args: list[str], user: User | None) -> None:
         print_api_error(error)
         return
 
+    except ExchangeRateNotFoundError as error:
+        print_rate_error(error)
+        return
+
     except (ValueError, TypeError) as error:
         print(error)
         return
@@ -269,6 +365,10 @@ def handle_sell(args: list[str], user: User | None) -> None:
         print_api_error(error)
         return
 
+    except ExchangeRateNotFoundError as error:
+        print_rate_error(error)
+        return
+
     except (ValueError, TypeError) as error:
         print(error)
         return
@@ -303,6 +403,10 @@ def handle_get_rate(args: list[str]) -> None:
         print_api_error(error)
         return
 
+    except ExchangeRateNotFoundError as error:
+        print_rate_error(error)
+        return
+
     except (ValueError, TypeError) as error:
         print(error)
         return
@@ -332,6 +436,263 @@ def handle_get_rate(args: list[str]) -> None:
         print(f"Время сохранения в JSON: {result['saved_at']} (UTC)")
 
 
+def handle_update_rates(args: list[str]) -> None:
+    """Запустить обновление курсов через Parser Service."""
+    try:
+        source = parse_update_rates_args(args)
+
+        config = ParserConfig()
+
+        clients = {
+            "coingecko": CoinGeckoClient(config),
+            "exchangerate": ExchangeRateApiClient(config),
+        }
+
+        storage = RatesStorage(config)
+
+        updater = RatesUpdater(
+            clients=clients,
+            storage=storage,
+        )
+
+        result = updater.run_update(source=source)
+
+    except ApiRequestError as error:
+        print_api_error(error)
+        return
+
+    except (ValueError, OSError) as error:
+        print(f"Ошибка обновления курсов: {error}")
+        return
+
+    print("Результаты обновления курсов:")
+
+    for source_key, statistics in result["sources"].items():
+        source_name = SOURCE_NAMES[source_key]
+
+        print(
+            f"- {source_name}: "
+            f"получено {statistics['fetched']}, "
+            f"обновлено {statistics['updated']}"
+        )
+
+    print(
+        f"Всего получено курсов: {result['fetched_count']}. "
+        f"Обновлено записей: {result['updated_count']}."
+    )
+
+    if result["status"] == "partial":
+        print("Обновление завершено с частичными ошибками.")
+
+        for source_key, error_message in result["errors"].items():
+            source_name = SOURCE_NAMES[source_key]
+
+            print(f"- Ошибка {source_name}: {error_message}")
+
+        print("Подробности: logs/parser.log")
+
+    else:
+        print("Обновление курсов успешно завершено.")
+
+    if result["last_refresh"]:
+        print(f"Последнее обновление кэша: {result['last_refresh']}")
+
+
+def _cache_quote_is_stale(
+    record: dict,
+    now: datetime,
+    ttl: timedelta,
+) -> bool:
+    """Определить, устарела ли полученная котировка."""
+    raw_time = record.get("saved_at")
+
+    if not isinstance(raw_time, str):
+        return True
+
+    try:
+        saved_at = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+
+    if saved_at.tzinfo is None:
+        return True
+
+    age = now - saved_at.astimezone(timezone.utc)
+
+    return not (timedelta(0) <= age < ttl)
+
+
+def handle_show_rates(args: list[str]) -> None:
+    """Показать курсы из локального кэша с фильтрами."""
+    try:
+        currency, top, base = parse_show_rates_args(args)
+
+        storage = RatesStorage(ParserConfig())
+        cache = storage.load_cache()
+
+        pairs = cache["pairs"]
+
+        if not pairs:
+            print(
+                "Локальный кеш курсов пуст. Выполните "
+                "'update-rates', чтобы загрузить данные."
+            )
+            return
+
+        # В хранилище все котировки выражены в USD.
+        rates_usd: dict[str, dict] = {
+            "USD": {
+                "rate": 1.0,
+                "source": "base_currency",
+                "updated_at": "",
+                "saved_at": "",
+            }
+        }
+
+        for pair, record in pairs.items():
+            if not pair.endswith("_USD"):
+                continue
+
+            code = pair.removesuffix("_USD")
+
+            if not isinstance(record, dict):
+                raise ValueError(f"Некорректная запись {pair}")
+
+            rate = record.get("rate")
+
+            if (
+                isinstance(rate, bool)
+                or not isinstance(rate, (int, float))
+                or not math.isfinite(rate)
+                or rate <= 0
+            ):
+                raise ValueError(f"Некорректный курс {pair}")
+
+            rates_usd[code] = record
+
+    except (ValueError, OSError) as error:
+        print(f"Ошибка чтения курсов: {error}")
+        return
+
+    # Проверяем наличие запрошенной валюты.
+    if currency is not None and currency not in rates_usd:
+        print(f"Курс для '{currency}' не найден в кеше.")
+        return
+
+    # Для пересчёта необходим курс базовой валюты к USD.
+    if base not in rates_usd:
+        print(
+            f"Курс базовой валюты '{base}' не найден в кеше. Выполните 'update-rates'."
+        )
+        return
+
+    if currency is not None:
+        codes = [currency]
+    else:
+        codes = sorted(code for code in rates_usd if code != "USD")
+
+    if top is not None:
+        # --top сортирует именно криптовалюты по цене в USD.
+        codes = [
+            code
+            for code in codes
+            if isinstance(
+                CURRENCY_REGISTRY.get(code),
+                CryptoCurrency,
+            )
+        ]
+
+        codes.sort(
+            key=lambda code: (
+                -rates_usd[code]["rate"],
+                code,
+            )
+        )
+
+        codes = codes[:top]
+
+    if not codes:
+        print("В кеше нет подходящих криптовалют.")
+        return
+
+    now = datetime.now(timezone.utc)
+    ttl = timedelta(
+        seconds=SettingsLoader().get(
+            "rates_ttl_seconds",
+            300,
+        )
+    )
+
+    base_record = rates_usd[base]
+    base_rate = base_record["rate"]
+
+    table = PrettyTable()
+    table.field_names = [
+        "Валютная пара",
+        "Курс",
+        "Источник",
+        "Обновлено (UTC)",
+        "Статус",
+    ]
+
+    has_stale = False
+
+    for code in codes:
+        record = rates_usd[code]
+        converted_rate = record["rate"] / base_rate
+
+        # Для составной пары учитываем оба исходных курса.
+        relevant_codes = {item for item in (code, base) if item != "USD"}
+
+        dates = []
+        stale = False
+
+        for item in relevant_codes:
+            source_record = rates_usd[item]
+
+            if _cache_quote_is_stale(source_record, now, ttl):
+                stale = True
+
+            raw_time = source_record.get("updated_at")
+
+            if isinstance(raw_time, str) and raw_time:
+                try:
+                    parsed = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+
+                    if parsed.tzinfo is not None:
+                        dates.append(parsed.astimezone(timezone.utc))
+                except ValueError:
+                    pass
+
+        updated_at = (
+            min(dates).isoformat()
+            if len(dates) == len(relevant_codes) and dates
+            else "—"
+        )
+
+        has_stale = has_stale or stale
+
+        table.add_row(
+            [
+                f"{code}_{base}",
+                f"{converted_rate:.10g}",
+                record.get("source", "unknown"),
+                updated_at,
+                "Устарел" if stale else "Актуален",
+            ]
+        )
+
+    print("Курсы из локального кэша")
+
+    if cache.get("last_refresh"):
+        print(f"Последнее обновление кэша: {cache['last_refresh']}")
+
+    print(table)
+
+    if has_stale:
+        print("Внимание: часть курсов устарела. Выполните 'update-rates'.")
+
+
 def run_cli() -> None:
     """Запустить интерактивный интерфейс валютного кошелька."""
     current_user: User | None = None
@@ -339,7 +700,7 @@ def run_cli() -> None:
     print("Валютный кошелёк")
     print(
         "Доступные команды: register, login, show-portfolio, "
-        "buy, sell, get-rate, help, exit"
+        "buy, sell, get-rate, update-rates, show-rates, help, exit"
     )
 
     while True:
@@ -393,6 +754,12 @@ def run_cli() -> None:
         elif action == "get-rate":
             handle_get_rate(args)
 
+        elif action == "update-rates":
+            handle_update_rates(args)
+
+        elif action == "show-rates":
+            handle_show_rates(args)
+
         elif action == "help":
             print("register --username <имя> --password <пароль>")
             print("login --username <имя> --password <пароль>")
@@ -400,6 +767,8 @@ def run_cli() -> None:
             print("buy --currency <валюта> --amount <количество>")
             print("sell --currency <валюта> --amount <количество>")
             print("get-rate --from <валюта> --to <валюта>")
+            print("update-rates [--source coingecko|exchangerate]")
+            print("show-rates [--currency CODE] [--top N] [--base CODE]")
             print("help — показать доступные команды")
             print("exit — завершить работу")
 
