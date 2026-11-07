@@ -12,7 +12,6 @@ from valutatrade_hub.infra.settings import SettingsLoader
 from valutatrade_hub.parser_service.api_clients import BaseApiClient
 from valutatrade_hub.parser_service.storage import RatesStorage
 
-
 SOURCE_NAMES = {
     "coingecko": "CoinGecko",
     "exchangerate": "ExchangeRate-API",
@@ -23,23 +22,16 @@ def configure_parser_logging() -> logging.Logger:
     """Настроить отдельный журнал Parser Service."""
     settings = SettingsLoader()
 
-    log_dir = (
-        settings.project_root
-        / settings.get("log_dir", "logs")
-    )
+    log_dir = settings.project_root / settings.get("log_dir", "logs")
     log_dir.mkdir(parents=True, exist_ok=True)
 
     log_path = log_dir / "parser.log"
 
     logger = logging.getLogger("valutatrade.parser")
 
-    level_name = str(
-        settings.get("log_level", "INFO")
-    ).upper()
+    level_name = str(settings.get("log_level", "INFO")).upper()
 
-    logger.setLevel(
-        getattr(logging, level_name, logging.INFO)
-    )
+    logger.setLevel(getattr(logging, level_name, logging.INFO))
     logger.propagate = False
 
     # Не создаём повторные обработчики журнала.
@@ -52,12 +44,8 @@ def configure_parser_logging() -> logging.Logger:
 
     handler = RotatingFileHandler(
         log_path,
-        maxBytes=int(
-            settings.get("log_max_bytes", 1_048_576)
-        ),
-        backupCount=int(
-            settings.get("log_backup_count", 3)
-        ),
+        maxBytes=int(settings.get("log_max_bytes", 1_048_576)),
+        backupCount=int(settings.get("log_backup_count", 3)),
         encoding="utf-8",
     )
 
@@ -84,25 +72,16 @@ class RatesUpdater:
     ) -> None:
         """Сохранить клиентов, хранилище и журнал."""
         if not clients:
-            raise ValueError(
-                "Необходимо передать хотя бы один API-клиент"
-            )
+            raise ValueError("Необходимо передать хотя бы один API-клиент")
 
         unknown = set(clients) - set(SOURCE_NAMES)
 
         if unknown:
-            raise ValueError(
-                "Неизвестные источники: "
-                + ", ".join(sorted(unknown))
-            )
+            raise ValueError("Неизвестные источники: " + ", ".join(sorted(unknown)))
 
         self.clients = dict(clients)
         self.storage = storage
-        self.logger = (
-            logger
-            if logger is not None
-            else configure_parser_logging()
-        )
+        self.logger = logger if logger is not None else configure_parser_logging()
 
     def run_update(
         self,
@@ -114,20 +93,14 @@ class RatesUpdater:
 
         else:
             if not isinstance(source, str):
-                raise ValueError(
-                    "Источник должен быть строкой"
-                )
+                raise ValueError("Источник должен быть строкой")
 
             source_key = source.strip().lower()
 
             if source_key not in self.clients:
-                raise ValueError(
-                    f"Неизвестный источник '{source}'"
-                )
+                raise ValueError(f"Неизвестный источник '{source}'")
 
-            selected_clients = {
-                source_key: self.clients[source_key]
-            }
+            selected_clients = {source_key: self.clients[source_key]}
 
         total_fetched = 0
         total_updated = 0
@@ -152,16 +125,13 @@ class RatesUpdater:
                 rates = client.fetch_rates()
 
                 if not isinstance(rates, dict) or not rates:
-                    raise ApiRequestError(
-                        f"{source_name}: источник не вернул курсы"
-                    )
+                    raise ApiRequestError(f"{source_name}: источник не вернул курсы")
 
             except ApiRequestError as error:
                 errors[source_key] = str(error)
 
                 self.logger.error(
-                    "Ошибка получения курсов: "
-                    "источник=%s ошибка=%s",
+                    "Ошибка получения курсов: источник=%s ошибка=%s",
                     source_name,
                     error,
                 )
@@ -203,9 +173,7 @@ class RatesUpdater:
         # Если ни один источник не ответил успешно,
         # вызывающий код получит специализированную ошибку.
         if not results:
-            self.logger.error(
-                "Обновление не выполнено: все источники недоступны"
-            )
+            self.logger.error("Обновление не выполнено: все источники недоступны")
 
             raise ApiRequestError(
                 "Не удалось обновить курсы ни из одного источника. "
@@ -217,8 +185,7 @@ class RatesUpdater:
         status = "partial" if errors else "success"
 
         self.logger.info(
-            "Завершение обновления: "
-            "статус=%s получено=%d обновлено=%d ошибок=%d",
+            "Завершение обновления: статус=%s получено=%d обновлено=%d ошибок=%d",
             status,
             total_fetched,
             total_updated,

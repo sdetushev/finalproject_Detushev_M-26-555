@@ -230,12 +230,12 @@ class RatesStorage:
             existing_ids = {record["id"] for record in history}
 
             history_changed = False
+            cache_changed = False
             updated_count = 0
 
             for record in records:
                 record_id = record["id"]
 
-                # Одинаковое измерение в историю не добавляем.
                 if record_id not in existing_ids:
                     history.append(record)
                     existing_ids.add(record_id)
@@ -249,21 +249,37 @@ class RatesStorage:
                 if current is not None:
                     current_time = _normalize_timestamp(current["updated_at"])
 
-                    if new_time <= current_time:
+                    # Старый курс не заменяет актуальный.
+                    if new_time < current_time:
                         continue
 
+                    # API повторно подтвердил тот же курс.
+                    # Обновляем время получения, но не updated_at.
+                    if new_time == current_time:
+                        if (
+                            current.get("rate") == record["rate"]
+                            and current.get("source") == source
+                        ):
+                            current["saved_at"] = received_at
+                            cache_changed = True
+
+                        continue
+
+                # Получено более свежее измерение.
                 cache["pairs"][pair] = {
                     "rate": record["rate"],
                     "updated_at": new_time,
+                    "saved_at": received_at,
                     "source": source,
                 }
 
                 updated_count += 1
+                cache_changed = True
 
             if history_changed:
                 self._write_json(self.history_path, history)
 
-            if updated_count:
+            if cache_changed:
                 cache["last_refresh"] = received_at
                 self._write_json(self.rates_path, cache)
 
